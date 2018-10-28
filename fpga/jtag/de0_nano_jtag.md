@@ -72,7 +72,7 @@ USB-Blaster protocol (handled by EPM240) is simple too (quote from OpenOCD sourc
 ```
 
 Both EPM240 and Cyclone have BGA packages. It's hard to monitor signals on their pins unless they are connected to something more accessible.
-But quartus library contains undocumented component `cycloneiv_jtag`. We can use that component to forward JTAG signals to the external pins:
+Quartus library contains undocumented component `cycloneive_jtag`. We can use that component to forward JTAG signals to the external pins:
 
 ```verilog
 module test(
@@ -99,15 +99,16 @@ endmodule
 Let's send some bits in bit-bang mode:
 
 ```python
-# TX only
+# TX only in the bit-bang mode
 dev.bulkWrite(0x02, [TMS, TMS|TCK] * 5 + [0])
 ```
 
 ![TX only](tx_only.png "TX only")
 
 ```python
-# TX+RX
+# TX+RX in the bit-bang mode
 dev.bulkWrite(0x02, [TMS|READ, TMS|TCK|READ] * 5 + [0])
+dev.bulkRead(0x81, 64)
 ```
 
 ![TX and RX](tx_rx.png "TX and RX")
@@ -115,5 +116,33 @@ dev.bulkWrite(0x02, [TMS|READ, TMS|TCK|READ] * 5 + [0])
 Yellow is TCK, blue is TMS. As you can see, bit-banging mode is not very fast.
 Single bit transmission consumes 830ns. Receiving bumps that to 1.33µs.
 Moreover, we waste two bytes on USB per single JTAG bit (16x overhead!).
+
+Now try byte-shift mode:
+
+```python
+# TX only in the byte-shift mode
+dev.bulkWrite(0x02, [BYTES|4, 0xDE, 0xAD, 0xBE, 0xEF])
+```
+
+![TX only bytes](tx_only_b.png "TX only bytes")
+
+Yellow is TCK, blue is TDI. Now transmission is four times faster (168ns per bit, 193ns taking account for gaps between bytes).
+Therefore, transmission speed will be capped at 5.18MBit/s.
+
+Note that TDI is switched in the middle between falling and rising edges of the TCK. Why not on the falling edge to give TDI more time to settle?
+Probably USB-Blaster designers attempted to simplify shifting by changing TDI and reading TDO at the same time.
+
+Also note that TCK remains high after byte transmission. We should account for that to properly combine bit-banging and byte-shifting code.
+
+```python
+# TX+RX in the byte-shift mode
+dev.bulkWrite(0x02, [BYTES|READ|4, 0xDE, 0xAD, 0xBE, 0xEF])
+dev.bulkRead(0x81, 64)
+```
+
+![TX and RX bytes](tx_rx_b.png "TX and RX bytes")
+
+Clock speed during duplex transfer is same, but gaps are larger than for transmission. It gives 208ns/bit with accounting for gaps.
+Therefore, duplex speed will be capped at 4.8MBit/s.
 
 TO BE CONTINUED...
