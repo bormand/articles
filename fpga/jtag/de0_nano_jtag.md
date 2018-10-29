@@ -16,8 +16,9 @@ And installing twelve gigs just to handle 100 JTAG exchanges per second isn't ve
 OpenOCD has drivers for USB-Blaster.
 Unfortunately, their driver can handle at most 250 exchanges per second
 (it probably suffers from the small packet problem that will be described below).
+Actually, it's fine for most applications, but can we do better?
 
-So, let's try to communicate with DE0-Nano directly!
+Let's try to communicate with DE0-Nano directly!
 
 ## First steps
 
@@ -144,5 +145,72 @@ dev.bulkRead(0x81, 64)
 
 Clock speed during duplex transfer is same, but gaps are larger than for transmission. It gives 208ns/bit with accounting for gaps.
 Therefore, duplex speed will be capped at 4.8MBit/s.
+
+## Need for speed
+
+Now we know physical limitations of the USB-Blaster. Can they be achieved?
+Let's start from easiest part — long transmission-only stream.
+
+```python
+# TX only stream
+for i in range(0, 100000):
+    dev.bulkWrite(0x02, [BYTES|63] + [0x55] * 63)
+```
+
+![TX only stream](tx_only_s.png "TX only stream")
+
+4.9MBit/s. Just 5% less than predicted 5.18MB/s even with small transfers!
+
+Look at large gaps with perfect 1ms interval between them. Those gaps are USB framing artifacts.
+Full-speed USB host sends Start-of-Frame packet every millisecond.
+It delays packets not fitting into the current frame and little FT245BL FIFO underflows.
+
+Increasing transfer size was attempted, but it changes nothing.
+
+Duplex transmission will be more difficult.
+We need to balance sending and receiving to keep both FT245BL FIFOs from overflow and underflow.
+USB host can respond to overflows and underflows much faster than our program, so let's use async transfers here.
+
+```python
+# TX+RX stream
+class Test:
+    def __init__(self, dev, limit):
+        self.total_rx = 0
+        self.total_tx = 0
+        self.limit = limit
+
+    def run(self):
+        self.tx = dev.getTransfer()
+        self.tx.setBulk(0x02, [BYTES|READ|63] + [0x55] * 63, self.tx_callback)
+        self.tx.submit()
+        self.rx = dev.getTransfer()
+        self.rx.setBulk(0x81, 64, self.rx_callback)
+        self.rx.submit()
+        while self.total_tx < self.limit or self.total_rx < self.limit:
+            ctx.handleEventsTimeout(0)
+
+    def tx_callback(self, t):
+        assert(t.getStatus() == usb1.TRANSFER_COMPLETED)
+        # ignore byte-shift mode header byte
+        self.total_tx += t.getActualLength() - 1
+        if self.total_tx < self.limit:
+            t.submit()
+
+    def rx_callback(self, t):
+        assert(t.getStatus() == usb1.TRANSFER_COMPLETED)
+        # don't forget about modem status bytes
+        assert(t.getActualLength() >= 2)
+        self.total_rx += t.getActualLength() - 2
+        if self.total_rx < self.limit:
+            t.submit()
+```
+
+![TX and RX stream](tx_rx_s.png "TX and RX stream")
+
+This code gives us 4.5MBit/s, 7% less than predicted. Increasing transfer sizes doesn't help here too.
+
+FT245BL is a full-speed USB device. Full-speed USB link works at 12Mbps, has 13 bytes overhead for bulk transfers
+and 10% of bandwith is reserved for control transfers, so we have around 18 packets per 1ms frame. This perfectly
+correlates with nine bars on the waveform above. So we run into USB FS limits here.
 
 TO BE CONTINUED...
