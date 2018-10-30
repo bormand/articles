@@ -161,14 +161,14 @@ for i in range(0, 100000):
 
 4.9MBit/s. Just 5% less than predicted 5.18MB/s even with small transfers!
 
-Look at large gaps with perfect 1ms interval between them. Those gaps are USB framing artifacts.
+Look at the large gaps with perfect 1ms interval between them. Those gaps are USB framing artifacts.
 Full-speed USB host sends Start-of-Frame packet every millisecond.
 It delays packets not fitting into the current frame and little FT245BL FIFO underflows.
 
 Increasing transfer size was attempted, but it changes nothing.
 
 Duplex transmission will be more difficult.
-We need to balance sending and receiving to keep both FT245BL FIFOs from overflow and underflow.
+We need to balance between sending and receiving to keep both FT245BL FIFOs from overflow and underflow.
 USB host can respond to overflows and underflows much faster than our program, so let's use async transfers here.
 
 ```python
@@ -212,5 +212,73 @@ This code gives us 4.5MBit/s, 7% less than predicted. Increasing transfer sizes 
 FT245BL is a full-speed USB device. Full-speed USB link works at 12Mbps, has 13 bytes overhead for bulk transfers
 and 10% of bandwith is reserved for control transfers, so we have around 18 packets per 1ms frame. This perfectly
 correlates with nine bars on the waveform above. So we run into USB FS limits here.
+
+Long streams are fine, but what about small non-pipelined requests?
+
+```python
+for i in range(0, 100):
+    tx = dev.getTransfer()
+    tx.setBulk(0x02, [BYTES|READ|32] + [0x55] * 32)
+    tx.submit()
+
+    rx = dev.getTransfer()
+    rx.setBulk(0x81, 64)
+    rx.submit()
+
+    while tx.isSubmitted() or rx.isSubmitted():
+        ctx.handleEventsTimeout(0)
+
+    assert(tx.getStatus() == usb1.TRANSFER_COMPLETED)
+    assert(tx.getActualLength() == 33)
+    assert(rx.getStatus() == usb1.TRANSFER_COMPLETED)
+    assert(rx.getActualLength() == 34)
+```
+
+![Small packets](small_pkts.png "Small packets")
+
+It's awful, only 16Kbit/s and 16ms per transfer (62.5 requests per second)! Waveform shows short bursts every 16ms. What happens? Looks like FT245BL delays responses for some reason.
+
+After some googling [app note AN232B-04](https://www.ftdichip.com/Support/Documents/AppNotes/AN232B-04_DataLatencyFlow.pdf) from FTDI was found.
+According to that note it's not a bug but a feature: `small amounts of data (or the end of large amounts of data), will be subject to a 16 millisecond delay when transferring into the PC`.
+
+FTDI offers four solutions for that issue:
+
+1. Fill buffer up to 64 bytes (2 status bytes and 62 bytes of payload). It works, as we can see in stream tests above.
+2. Change RS232 status lines. FT245BL is a parallel converter, it has no such lines.
+3. Send event character from the device side. We can persuade USB-Blaster to send us specific byte, but this will interfere with JTAG protocol.
+4. Adjust delay for short packets. But it must be at least 1ms, so we can't completely eliminate delay.
+
+Seems like the only practical way to achieve maximal speed is... just sending more data!
+
+Remember that USB-Blaster responds with one byte for:
+- each byte with READ (0x40) bit set in bit-bang more
+- each byte in byte-shift mode if READ bit was set in the header byte (excluding header byte itself)
+
+Delay should disappear if we align incoming packets to 62 bytes using rules above.
+Non-pipelined request will contain at most one byte-shift header,
+so we can just set READ bit for everything and append dummy bytes up to 62-63 bytes.
+
+```python
+for i in range(0, 100000):
+    tx = dev.getTransfer()
+    tx.setBulk(0x02, [BYTES|READ|32] + [0x55] * 32 + [READ] * 30)
+    tx.submit()
+
+    rx = dev.getTransfer()
+    rx.setBulk(0x81, 64)
+    rx.submit()
+
+    while tx.isSubmitted() or rx.isSubmitted():
+        ctx.handleEventsTimeout(0)
+
+    assert(tx.getStatus() == usb1.TRANSFER_COMPLETED)
+    assert(tx.getActualLength() == 63)
+    assert(rx.getStatus() == usb1.TRANSFER_COMPLETED)
+    assert(rx.getActualLength() == 64)
+```
+
+![Small packets 2](small_pkts2.png "Small packets 2")
+
+Much better! 1.2MB/s of useful data (excluding padding) and 4600 requests per second. Seventy times faster.
 
 TO BE CONTINUED...
