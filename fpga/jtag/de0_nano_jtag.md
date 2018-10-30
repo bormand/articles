@@ -279,6 +279,19 @@ for i in range(0, 100000):
 
 ![Small packets 2](small_pkts2.png "Small packets 2")
 
-Much better! 1.2MB/s of useful data (excluding padding) and 4600 requests per second. Seventy times faster.
+Much better! 1.2MB/s of useful data (excluding padding) and 4600 requests per second. Seventy times faster. Can we improve this result? Let's look what happens on the USB bus.
+
+![Small packets 3](small_pkts3.png "Small packets 3")
+
+This waveform shows signals from USB D- line (blue) and JTAG TCK line (yellow).
+You can see that FT245BL waits until whole packet will be received from the USB.
+After that USB host tries to do IN transaction two times, but gets NAK from FT245BL since buffer isn't full yet.
+Third IN transaction succeeds. Notice 20µs delay between USB transactions.
+
+Looks like we can't speed up short non-pipelined transfers anymore.
+
+## JTAG
+
+Enough speed-testing. Let's talk about JTAG and send some real commands.
 
 TO BE CONTINUED...
